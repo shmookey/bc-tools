@@ -21,4 +21,15 @@ executable arc
                      , network
                      , optparse-applicative
 
+executable jrc
+  hs-source-dirs:      src
+  main-is:             jrc.hs
+  default-language:    Haskell2010
+  build-depends:       base >= 4.7 && < 5
+                     , aeson
+                     , bytestring
+                     , streaming-commons
+                     , network
+                     , optparse-applicative
+
 

@@ -32,4 +32,25 @@ executable jrc
                      , network
                      , optparse-applicative
 
+executable munt
+  hs-source-dirs:      src
+  main-is:             munt.hs
+  default-language:    Haskell2010
+  build-depends:       base >= 4.7 && < 5
+                     , asn1-encoding
+                     , asn1-types
+                     , base64-bytestring
+                     , bytestring
+                     , conduit
+                     , conduit-combinators
+                     , cryptonite
+                     , digits
+                     , hex
+                     , memory
+                     , nats
+                     , optparse-applicative
+                     , split
+                     , strict
+                     , text
+                     , transformers
 

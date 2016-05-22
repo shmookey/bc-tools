@@ -9,6 +9,7 @@ all: .stack-work
 install:
 	cp build/arc /usr/local/bin/arc
 	cp build/jrc /usr/local/bin/jrc
+	cp build/munt /usr/local/bin/munt
 
 clean:
 	stack clean

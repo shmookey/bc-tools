@@ -76,10 +76,13 @@ primitive :: String -> Conduit B8.ByteString IO B8.ByteString
 primitive x = case x of
   "b64e"      -> CL.map B64.encode 
   "b64d"      -> CL.map B64.decodeLenient
-  "reverse"   -> CL.map B8.reverse
   "asn1der"   -> (CL.map $ AsnE.decodeASN1' AsnBE.DER) 
              =$= filterRight
              =$= CL.map (B8.pack . show)
+
+  -- List operations
+  "len"       -> CL.map $ unroll . toInteger . B8.length
+  "reverse"   -> CL.map B8.reverse
 
   -- Stream operations
   "bytes"     -> CL.concatMap $ map B8.singleton . B8.unpack
@@ -168,7 +171,7 @@ readCliOpts =
     formats   = ["bin", "dec", "hex", "unbin", "undec", "unhex"]
     math      = ["+", "-", "*", "/"]
     stream    = ["bytes", "consume", "lines", "unlines", "words", "unwords"]
-    listfns   = ["take", "drop", "reverse"]
+    listfns   = ["take", "drop", "reverse", "len"]
     hashes    = ["blake2s256", "blake2s224", "blake2sp256", "blake2sp224",
                  "blake2b512", "blake2bp512", "md2", "md4", "md5", "sha1",
                  "sha224", "sha256", "sha384", "sha512", "sha512t256",

@@ -33,9 +33,9 @@ Available options:
 Available functions:
   Encode   b64e b64d
   Format   bin dec hex unbin undec unhex
-  Math     + - * /
-  List     take drop reverse
-  Stream   bytes consume lines unlines words unwords
+  Math     + - * / % ^
+  List     drop head init last len reverse tail take
+  Stream   bytes consume id lines repeat unlines unwords words
   Hash     blake2s256 blake2s224 blake2sp256 blake2sp224 blake2b512 blake2bp512
            md2 md4 md5 sha1 sha224 sha256 sha384 sha512 sha512t256 sha512t224
            sha3512 sha3384 sha3256 sha3224 keccak512 keccak384 keccak256

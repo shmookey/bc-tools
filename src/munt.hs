@@ -32,6 +32,9 @@ data Options = Options
   { optExpression :: String
   }
 
+type Blob = B8.ByteString
+type Transform = Conduit Blob IO Blob
+
 -- | Split on a delimeter and trim whitespace on each term
 split :: String -> String -> [String]
 split x = map (unwords . words) . Split.splitOn x
@@ -40,28 +43,22 @@ split x = map (unwords . words) . Split.splitOn x
 evaluate :: String -> IO ()
 evaluate = flip ($$) stdout . foldl (=$=) stdin . map segment . split "->"
 
-segment :: String -> Conduit B8.ByteString IO B8.ByteString
+segment :: String -> Transform
 segment s = case split " " s of
   []     -> CL.map id
-  x : [] -> primitive x
-  x : xs -> apply x xs
+  x : xs -> uncurry apply $ opFix x xs
+
+-- Allow no whitespace between operator and operand
+opFix :: String -> [String] -> (String, [String])
+opFix x@(h:t) xs =
+    if elem h "+-*/%^"
+    then ([h], if length t > 0 then t:xs else xs)
+    else (x, xs)
 
 apply :: String -> [String] -> Conduit B8.ByteString IO B8.ByteString
-apply fname args = case fname of 
-  "take" -> binOp B8.take intArgs
-  "drop" -> binOp B8.drop intArgs
-  "+"    -> intOp (+)     natArgs
-  "-"    -> intOp (-)     natArgs
-  "*"    -> intOp (*)     natArgs
-  "/"    -> intOp (div)   natArgs
-  _      -> error   $ "Unknown function: " ++ fname
-  where intArgs = map readMaybe args :: [Maybe Int]
-        natArgs = map readMaybe args :: [Maybe Integer]
-        binOp op ((Just n) : []) = CL.map (op n)
-        binOp _ _                = fail $ "Bad arguments."
-        intOp op args = binOp (asInteger op) args
-        asInteger f = \x -> unroll . f x . roll
-        
+apply fname args = CL.concatMap (:bArgs) =$= primitive fname
+  where bArgs = map (unroll . toInteger . read) args
+
 roll :: B8.ByteString -> Integer
 roll = B.foldl' unstep 0 . B.reverse
   where unstep a b = a `shiftL` 8 .|. fromIntegral b
@@ -72,10 +69,8 @@ unroll = B.unfoldr step
     step 0 = Nothing
     step i = Just (fromIntegral i, i `shiftR` 8)
 
-primitive :: String -> Conduit B8.ByteString IO B8.ByteString
+primitive :: String -> Transform
 primitive x = case x of
-  "b64e"      -> CL.map B64.encode 
-  "b64d"      -> CL.map B64.decodeLenient
   "asn1der"   -> (CL.map $ AsnE.decodeASN1' AsnBE.DER) 
              =$= filterRight
              =$= CL.map (B8.pack . show)
@@ -83,11 +78,19 @@ primitive x = case x of
   -- List operations
   "len"       -> CL.map $ unroll . toInteger . B8.length
   "reverse"   -> CL.map B8.reverse
+  "head"      -> CL.map $ B8.singleton . B8.head
+  "tail"      -> CL.map B8.tail
+  "init"      -> CL.map B8.init
+  "last"      -> CL.map $ B8.singleton . B8.last
+  "take"      -> eat 2 $ \[xs, n] -> B8.take (fromInteger $ roll n) xs
+  "drop"      -> eat 2 $ \[xs, n] -> B8.drop (fromInteger $ roll n) xs
 
   -- Stream operations
+  "id"        -> CL.map id
   "bytes"     -> CL.concatMap $ map B8.singleton . B8.unpack
   "consume"   -> CL.sequence CL.consume =$= CL.map B8.concat
   "lines"     -> CL.concatMap B8.lines
+  "repeat"    -> eat' 2 $ \[x, n] -> take (fromInteger $ roll n) $ repeat x
   "unlines"   -> CL.sequence CL.consume =$= CL.map (B8.init . B8.unlines)
   "words"     -> CL.concatMap B8.words
   "unwords"   -> CL.sequence CL.consume =$= CL.map B8.unwords
@@ -99,6 +102,18 @@ primitive x = case x of
   "undec"     -> CL.map $ unroll . toInteger . read . B8.unpack
   "bin"       -> CL.map $ B.concatMap (B8.pack . printf "%0.8b")
   "unbin"     -> CL.map $ unroll . Digits.unDigits 2 . map (toInteger . read) . map (:[]) . B8.unpack
+
+  -- Math
+  "+"         -> eat 2 $ unroll . (\[x, y] -> x + y) . map roll
+  "-"         -> eat 2 $ unroll . (\[x, y] -> x - y) . map roll
+  "*"         -> eat 2 $ unroll . (\[x, y] -> x * y) . map roll
+  "/"         -> eat 2 $ unroll . (\[x, y] -> x `div` y) . map roll
+  "%"         -> eat 2 $ unroll . (\[x, y] -> x `mod` y) . map roll
+  "^"         -> eat 2 $ unroll . (\[x, y] -> x ^ y) . map roll
+
+  -- Encoding
+  "b64e"      -> CL.map B64.encode 
+  "b64d"      -> CL.map B64.decodeLenient
 
   -- Hashes
   "blake2s256"  -> hmap H.Blake2s_256
@@ -133,6 +148,13 @@ primitive x = case x of
   "skein512256" -> hmap H.Skein512_256
   "skein512224" -> hmap H.Skein512_224
   "whirlpool"   -> hmap H.Whirlpool
+
+  _             -> error $ printf "Unknown function: '%s'" x
+  where
+    eat :: Int -> ([B8.ByteString] -> B8.ByteString) -> Transform
+    eat n f = (CL.sequence $ CL.take n) =$= CL.map f
+    eat' :: Int -> ([B8.ByteString] -> [B8.ByteString]) -> Transform
+    eat' n f = (CL.sequence $ CL.take n) =$= CL.concatMap f
 
 hash x = BA.convert . H.hashWith x
 hmap :: H.HashAlgorithm a => a -> Conduit B8.ByteString IO B8.ByteString
@@ -169,9 +191,11 @@ readCliOpts =
                  ("List", listfns), ("Stream", stream), ("Hash", hashes)]
     encodings = ["b64e", "b64d"]
     formats   = ["bin", "dec", "hex", "unbin", "undec", "unhex"]
-    math      = ["+", "-", "*", "/"]
-    stream    = ["bytes", "consume", "lines", "unlines", "words", "unwords"]
-    listfns   = ["take", "drop", "reverse", "len"]
+    math      = ["+", "-", "*", "/", "%", "^"]
+    stream    = ["bytes", "consume", "id", "lines", "repeat", "unlines",
+                 "unwords", "words"]
+    listfns   = ["drop", "head", "init", "last", "len", "reverse", "tail", 
+                 "take"]
     hashes    = ["blake2s256", "blake2s224", "blake2sp256", "blake2sp224",
                  "blake2b512", "blake2bp512", "md2", "md4", "md5", "sha1",
                  "sha224", "sha256", "sha384", "sha512", "sha512t256",

@@ -34,8 +34,14 @@ Available functions:
   Encode   b64e b64d
   Format   bin dec hex unbin undec unhex
   Math     + - * / % ^
+  Bits     and or xor not rsh lsh
+  Util     id trace
   List     drop head init last len reverse tail take
-  Stream   bytes consume id lines repeat unlines unwords words
+  Stream   bytes concat consume filter flip insert lines repeat unlines unwords
+           words
+  Cipher   aes128d aes128e aes192d aes192e aes256d aes256e dese desd deseee3e
+           deseee3d desede3e desede3d deseee2e deseee2d desede2e desede2d
+           cam128e cam128d
   Hash     blake2s256 blake2s224 blake2sp256 blake2sp224 blake2b512 blake2bp512
            md2 md4 md5 sha1 sha224 sha256 sha384 sha512 sha512t256 sha512t224
            sha3512 sha3384 sha3256 sha3224 keccak512 keccak384 keccak256

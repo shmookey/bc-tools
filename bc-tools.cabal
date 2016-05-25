@@ -49,6 +49,8 @@ executable munt
                      , memory
                      , nats
                      , optparse-applicative
+                     , parsec
+                     , process
                      , split
                      , strict
                      , text

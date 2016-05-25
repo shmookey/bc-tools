@@ -5,25 +5,40 @@
 {-# LANGUAGE TypeFamilies #-}
 -- munt - cryptographic function composition
 
+import qualified Crypto.Hash as H
+import qualified Crypto.Cipher.Types as Cipher
+import qualified Crypto.Error as CError
+import qualified Crypto.Cipher.AES as AES
+import qualified Crypto.Cipher.DES as DES
+import qualified Crypto.Cipher.TripleDES as TripleDES
+import qualified Crypto.Cipher.Camellia as Camellia
 import qualified Data.ASN1.Encoding as AsnE
 import qualified Data.ASN1.BinaryEncoding as AsnBE
-import qualified Data.List.Split as Split
+import qualified Data.ASN1.Types as AsnT
+import qualified Data.ASN1.Stream as AsnS
+import qualified Data.Bits as Bits
+import qualified Data.ByteArray as BA
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Base64 as B64
-import qualified Data.ByteArray as BA
 import qualified Data.Conduit.List as CL
 import qualified Data.Conduit.Combinators as CC
-import qualified Data.Hex as Hex
-import qualified Options.Applicative as Opts
-import qualified Crypto.Hash as H
-import Options.Applicative ((<>))
-import qualified Options.Applicative.Help.Chunk as OAHC
-import Data.Conduit (Source, Sink, Conduit, yield, ($$), (=$=))
-import Control.Monad.IO.Class (liftIO)
-import Data.Bits (Bits, (.|.), shiftL, shiftR)
+import qualified Data.Conduit as C
 import qualified Data.Digits as Digits
+import qualified Data.Hex as Hex
+import qualified Data.List.Split as Split
+import qualified Options.Applicative as Opts
+import qualified Options.Applicative.Help.Chunk as OAHC
+import qualified System.IO as IO
+import qualified System.Process as Proc
+import qualified Text.Parsec as P
+import qualified Text.ParserCombinators.Parsec as PC
 
+import Options.Applicative ((<>),(<|>))
+import Data.Conduit (Source, Sink, Conduit, await, yield, ($$), (=$=))
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad (join)
+import Data.Bits (Bits, (.|.), (.&.), shiftL, shiftR, xor)
 import Data.List (intercalate)
 import Text.Printf (printf)
 import Text.Read (readMaybe)
@@ -34,34 +49,111 @@ data Options = Options
 
 type Blob = B8.ByteString
 type Transform = Conduit Blob IO Blob
+type Interval  = ([Int], Int)
+data InputSource = FileSource FilePath | StdIn
+
+data Pipeline = Pipeline
+  { inputs :: [InputSource]
+  , tasks  :: [(String, [Blob], Interval)]
+  }
+
+pipeline :: PC.CharParser () Pipeline
+pipeline = chain
+  where
+    fnCall  = let fnName   = operator <|> name
+                  name     = P.many1 P.alphaNum
+                  operator = (:[]) `fmap` P.oneOf "+-*/%^"
+              in do ivl  <- spacePadded interval
+                    fn   <- spacePadded fnName
+                    args <- spacePadded argList
+                    return (fn, args, ivl)
+
+    argList = let arg     = argInt <|> argStr
+                  argInt  = (unroll . toInteger) `fmap` intLiteral
+                  argStr  = B8.pack `fmap` quotedString
+              in P.option [] $ P.sepEndBy arg P.space
+
+    interval = let stepList = P.sepBy intLiteral comma
+                   stepDef  = do steps <- stepList
+                                 fslash
+                                 cycle <- intLiteral
+                                 return (steps, cycle)
+               in P.option stdInterval stepDef
+   
+    chain    = let arrow         = spacePadded basicArrow <|> spacePadded concatArrow
+                   basicArrow    = (P.string "->") >> return Nothing
+                   concatArrow   = do P.char '|'
+                                      n <- (unroll . toInteger) `fmap` intLiteral
+                                      P.char '>'
+                                      return $ Just ("concat", [n], stdInterval)
+                   next (Just a) = fnCall >>= \x -> return [a, x]
+                   next Nothing  = fnCall >>= \x -> return [x]
+               in do srcs <- inputs
+                     f1   <- fnCall
+                     fs   <- P.many (arrow >>= next)
+                     return $ Pipeline srcs (f1 : concat fs)
+
+    inputs = let inputArrow   = (P.string "=>") >> return ()
+                 inputSources = P.sepBy (spacePadded inputSource) comma
+                 srcSection   = do xs <- spacePadded inputSources
+                                   spacePadded inputArrow
+                                   return xs
+             in P.try srcSection <|> return [StdIn]
+
+    inputSource = let filepath = intercalate "/" `fmap` P.sepEndBy filename fslash
+                      filename = rawFile <|> quotedString
+                      rawFile  = do x  <- P.noneOf "-/, ="
+                                    xs <- P.many $ P.noneOf ("/, =")
+                                    return (x:xs)
+                  in (P.string "-" >> return StdIn)
+                 <|> (filepath >>= return . FileSource)
+    
+    stdInterval  = ([1], 1)
+    quotedString = P.between dblQuote dblQuote $ P.many1 nonDblQuote
+    intLiteral   = read `fmap` P.many1 P.digit
+    spacePadded  = P.between P.spaces P.spaces
+    dblQuote     = P.char '"'
+    nonDblQuote  = P.noneOf "\""
+    comma        = P.char ','
+    fslash       = P.char '/'
 
 -- | Split on a delimeter and trim whitespace on each term
 split :: String -> String -> [String]
 split x = map (unwords . words) . Split.splitOn x
 
 -- | Evaluate a function expression
-evaluate :: String -> IO ()
-evaluate = flip ($$) stdout . foldl (=$=) stdin . map segment . split "->"
+evaluate :: String -> IO.Handle -> IO.Handle -> IO ()
+evaluate x hIn hOut = case P.parse pipeline "(command)" x of
+  Left err -> fail $ show err
+  Right (Pipeline sources fs) ->
+    let input  = createProducer hIn sources
+        output = CC.sinkHandle  hOut
+    in (foldl (=$=) input $ map (\(f,a,i) -> apply f a i) fs) $$ output
 
-segment :: String -> Transform
-segment s = case split " " s of
-  []     -> CL.map id
-  x : xs -> uncurry apply $ opFix x xs
+createProducer :: IO.Handle -> [InputSource] -> Source IO Blob
+createProducer stdin = foldl1 (>>) . map getSource
+  where getSource (FileSource p) = liftIO (B.readFile p) >>= yield
+        getSource StdIn          = liftIO (B.hGetContents stdin) >>= yield
 
--- Allow no whitespace between operator and operand
-opFix :: String -> [String] -> (String, [String])
-opFix x@(h:t) xs =
-    if elem h "+-*/%^"
-    then ([h], if length t > 0 then t:xs else xs)
-    else (x, xs)
-
-apply :: String -> [String] -> Conduit B8.ByteString IO B8.ByteString
-apply fname args = CL.concatMap (:bArgs) =$= primitive fname
-  where bArgs = map (unroll . toInteger . read) args
+apply :: String -> [Blob] -> Interval -> Conduit Blob IO Blob
+apply fname args (steps, cycle) =
+  if cycle == 1 then primitive fname args
+  else let skips       = CL.filter fst 
+                     =$= CL.map snd
+           runs        = CL.filter (not . fst) 
+                     =$= CL.map snd 
+                     =$= primitive fname args
+           mark        = CL.sequence (CL.take cycle) =$= CL.concatMap (map skip . zip [1..])
+           skip (i,x)  = (not $ elem i steps, x)
+           both a b    = C.getZipConduit $ C.ZipConduit a <* C.ZipConduit b
+       in mark =$= both skips runs
 
 roll :: B8.ByteString -> Integer
 roll = B.foldl' unstep 0 . B.reverse
   where unstep a b = a `shiftL` 8 .|. fromIntegral b
+
+roll' :: B8.ByteString -> Int
+roll' = fromInteger . roll
 
 unroll :: (Integral a, Bits a) => a -> B.ByteString
 unroll = B.unfoldr step
@@ -69,11 +161,14 @@ unroll = B.unfoldr step
     step 0 = Nothing
     step i = Just (fromIntegral i, i `shiftR` 8)
 
-primitive :: String -> Transform
-primitive x = case x of
-  "asn1der"   -> (CL.map $ AsnE.decodeASN1' AsnBE.DER) 
-             =$= filterRight
-             =$= CL.map (B8.pack . show)
+type Cipher a = Blob -> a
+
+primitive :: String -> [Blob] -> Transform
+primitive x args = case x of
+  "trace"    -> CC.iterM (putStrLn . printf "TRACE: %s" . show)
+  "pasn1d"   -> (CL.map $ AsnE.decodeASN1' AsnBE.DER) 
+            =$= filterRight
+            =$= CL.concatMap (map (B8.pack . show))
 
   -- List operations
   "len"       -> CL.map $ unroll . toInteger . B8.length
@@ -82,18 +177,24 @@ primitive x = case x of
   "tail"      -> CL.map B8.tail
   "init"      -> CL.map B8.init
   "last"      -> CL.map $ B8.singleton . B8.last
-  "take"      -> eat 2 $ \[xs, n] -> B8.take (fromInteger $ roll n) xs
-  "drop"      -> eat 2 $ \[xs, n] -> B8.drop (fromInteger $ roll n) xs
+  "take"      -> eat 2 $ \[n, xs] -> B8.take (fromInteger $ roll n) xs
+  "drop"      -> eat 2 $ \[n, xs] -> B8.drop (fromInteger $ roll n) xs
 
   -- Stream operations
   "id"        -> CL.map id
+  "insert"    -> CL.concatMap (:args)
   "bytes"     -> CL.concatMap $ map B8.singleton . B8.unpack
   "consume"   -> CL.sequence CL.consume =$= CL.map B8.concat
   "lines"     -> CL.concatMap B8.lines
-  "repeat"    -> eat' 2 $ \[x, n] -> take (fromInteger $ roll n) $ repeat x
+  "repeat"    -> eat' 2 $ \[n, x] -> take (fromInteger $ roll n) $ repeat x
+  "filter"    -> CL.filter (const False)
+  "flip"      -> eat' 2 $ \[x, y] -> [y, x]
   "unlines"   -> CL.sequence CL.consume =$= CL.map (B8.init . B8.unlines)
   "words"     -> CL.concatMap B8.words
   "unwords"   -> CL.sequence CL.consume =$= CL.map B8.unwords
+  "concat"    -> case args of 
+                    [n] -> CL.sequence (stake n) =$= sconcat
+                    _   -> CL.sequence (CL.take 1 >>= stake . head) =$= sconcat
 
   -- Number formatting
   "hex"       -> CL.map Hex.hex
@@ -104,16 +205,44 @@ primitive x = case x of
   "unbin"     -> CL.map $ unroll . Digits.unDigits 2 . map (toInteger . read) . map (:[]) . B8.unpack
 
   -- Math
-  "+"         -> eat 2 $ unroll . (\[x, y] -> x + y) . map roll
-  "-"         -> eat 2 $ unroll . (\[x, y] -> x - y) . map roll
-  "*"         -> eat 2 $ unroll . (\[x, y] -> x * y) . map roll
-  "/"         -> eat 2 $ unroll . (\[x, y] -> x `div` y) . map roll
-  "%"         -> eat 2 $ unroll . (\[x, y] -> x `mod` y) . map roll
-  "^"         -> eat 2 $ unroll . (\[x, y] -> x ^ y) . map roll
+  "+"         -> eat 2 $ unroll . (\[d, x] -> x + d)     . map roll
+  "-"         -> eat 2 $ unroll . (\[d, x] -> x - d)     . map roll
+  "*"         -> eat 2 $ unroll . (\[d, x] -> x * d)     . map roll
+  "^"         -> eat 2 $ unroll . (\[d, x] -> x ^ d)     . map roll
+  "/"         -> eat 2 $ unroll . (\[d, x] -> x `div` d) . map roll
+  "%"         -> eat 2 $ unroll . (\[d, x] -> x `mod` d) . map roll
+
+  -- Bitwise
+  "and"       -> eat 2 $ unroll . (\[x, y] -> x .&. y)   . map roll
+  "or"        -> eat 2 $ unroll . (\[x, y] -> x .|. y)   . map roll
+  "xor"       -> eat 2 $ unroll . (\[x, y] -> x `xor` y) . map roll
+  "not"       -> CL.map $ unroll . Bits.complement . roll
+  "rsh"       -> eat 2 $ unroll . (\[n, x] -> x `shiftR` (fromInteger n)) . map roll
+  "lsh"       -> eat 2 $ unroll . (\[n, x] -> x `shiftL` (fromInteger n)) . map roll
 
   -- Encoding
   "b64e"      -> CL.map B64.encode 
   "b64d"      -> CL.map B64.decodeLenient
+
+  -- Cipher
+  "aes128e"   -> ecbEncrypt (cipher :: Cipher AES.AES128)
+  "aes128d"   -> ecbDecrypt (cipher :: Cipher AES.AES128)
+  "aes192e"   -> ecbEncrypt (cipher :: Cipher AES.AES192)
+  "aes192d"   -> ecbDecrypt (cipher :: Cipher AES.AES192)
+  "aes256e"   -> ecbEncrypt (cipher :: Cipher AES.AES256)
+  "aes256d"   -> ecbDecrypt (cipher :: Cipher AES.AES256)
+  "cam128e"   -> ecbEncrypt (cipher :: Cipher Camellia.Camellia128) 
+  "cam128d"   -> ecbDecrypt (cipher :: Cipher Camellia.Camellia128) 
+  "dese"      -> ecbEncrypt (cipher :: Cipher DES.DES) 
+  "desd"      -> ecbDecrypt (cipher :: Cipher DES.DES) 
+  "deseee3e"  -> ecbEncrypt (cipher :: Cipher TripleDES.DES_EEE3) 
+  "deseee3d"  -> ecbDecrypt (cipher :: Cipher TripleDES.DES_EEE3) 
+  "desede3e"  -> ecbEncrypt (cipher :: Cipher TripleDES.DES_EDE3) 
+  "desede3d"  -> ecbDecrypt (cipher :: Cipher TripleDES.DES_EDE3) 
+  "deseee2e"  -> ecbEncrypt (cipher :: Cipher TripleDES.DES_EEE2) 
+  "deseee2d"  -> ecbDecrypt (cipher :: Cipher TripleDES.DES_EEE2) 
+  "desede2e"  -> ecbEncrypt (cipher :: Cipher TripleDES.DES_EDE2) 
+  "desede2d"  -> ecbDecrypt (cipher :: Cipher TripleDES.DES_EDE2) 
 
   -- Hashes
   "blake2s256"  -> hmap H.Blake2s_256
@@ -151,10 +280,21 @@ primitive x = case x of
 
   _             -> error $ printf "Unknown function: '%s'" x
   where
-    eat :: Int -> ([B8.ByteString] -> B8.ByteString) -> Transform
-    eat n f = (CL.sequence $ CL.take n) =$= CL.map f
+    eat :: Int -> ([Blob] -> Blob) -> Transform
+    eat n f = let pre = take n args
+                  rem = n - (length args)
+               in (CL.sequence $ CL.take rem) =$= CL.map (\xs -> f (pre ++ xs))
     eat' :: Int -> ([B8.ByteString] -> [B8.ByteString]) -> Transform
-    eat' n f = (CL.sequence $ CL.take n) =$= CL.concatMap f
+    eat' n f = let pre = take n args
+                   rem = n - (length args)
+               in (CL.sequence $ CL.take rem) =$= CL.concatMap (\xs -> f (pre ++ xs))
+    cipher :: Cipher.Cipher a => Blob -> a
+    cipher k = CError.throwCryptoError $ Cipher.cipherInit k
+    some n   = CL.sequence $ CL.take n
+    sconcat  = CL.map B.concat
+    stake    = CL.take . roll'
+    ecbEncrypt f = eat 2 $ \[k, c] -> Cipher.ecbEncrypt (f k) c
+    ecbDecrypt f = eat 2 $ \[k, c] -> Cipher.ecbDecrypt (f k) c
 
 hash x = BA.convert . H.hashWith x
 hmap :: H.HashAlgorithm a => a -> Conduit B8.ByteString IO B8.ByteString
@@ -180,29 +320,34 @@ readCliOpts =
   where 
     cliOpts = Options
       <$> Opts.argument Opts.str
-          ( Opts.metavar "EXPR"
+          ( Opts.metavar "[ sources => ] action [ -> action -> ... ]"
          <> Opts.help    "Function expression to use for transformation."
           )
-    ind = 10
-    fnDoc     = printf "Available functions:\n%s" $ 
-                intercalate "" (map (uncurry list) sections)
+    ind       = 10
+    fnDoc     = printf "Available functions:\n%s" $ intercalate "" sections
     list t xs = printf "  %-7s %s\n" t $ drop ind (indentedList ind 80 xs)
-    sections  = [("Encode", encodings), ("Format", formats), ("Math", math),
-                 ("List", listfns), ("Stream", stream), ("Hash", hashes)]
-    encodings = ["b64e", "b64d"]
-    formats   = ["bin", "dec", "hex", "unbin", "undec", "unhex"]
-    math      = ["+", "-", "*", "/", "%", "^"]
-    stream    = ["bytes", "consume", "id", "lines", "repeat", "unlines",
-                 "unwords", "words"]
-    listfns   = ["drop", "head", "init", "last", "len", "reverse", "tail", 
-                 "take"]
-    hashes    = ["blake2s256", "blake2s224", "blake2sp256", "blake2sp224",
-                 "blake2b512", "blake2bp512", "md2", "md4", "md5", "sha1",
-                 "sha224", "sha256", "sha384", "sha512", "sha512t256",
-                 "sha512t224", "sha3512", "sha3384", "sha3256", "sha3224",
-                 "keccak512", "keccak384", "keccak256", "keccak224",
-                 "ripemd160", "skein256256", "skein256224", "skein512512",
-                 "skein512384", "skein512256", "skein512224", "whirlpool"]
+    sections  = map (uncurry list)
+      [ ("Encode", ["b64e", "b64d"])
+      , ("Format", ["bin", "dec", "hex", "unbin", "undec", "unhex"])
+      , ("Math",   ["+", "-", "*", "/", "%", "^"])
+      , ("Bits",   ["and", "or", "xor", "not", "rsh", "lsh"])
+      , ("Util",   ["id", "trace"])
+      , ("List",   ["drop", "head", "init", "last", "len", "reverse", "tail",
+                    "take"])
+      , ("Stream", ["bytes", "concat", "consume", "filter", "flip", "insert",
+                    "lines", "repeat", "unlines", "unwords", "words"])
+      , ("Cipher", ["aes128d", "aes128e", "aes192d", "aes192e", "aes256d", 
+                    "aes256e", "dese", "desd", "deseee3e", "deseee3d",
+                    "desede3e", "desede3d", "deseee2e", "deseee2d", "desede2e",
+                    "desede2d", "cam128e", "cam128d"])
+      , ("Hash",   ["blake2s256", "blake2s224", "blake2sp256", "blake2sp224",
+                    "blake2b512", "blake2bp512", "md2", "md4", "md5", "sha1",
+                    "sha224", "sha256", "sha384", "sha512", "sha512t256",
+                    "sha512t224", "sha3512", "sha3384", "sha3256", "sha3224",
+                    "keccak512", "keccak384", "keccak256", "keccak224",
+                    "ripemd160", "skein256256", "skein256224", "skein512512",
+                    "skein512384", "skein512256", "skein512224", "whirlpool"])
+      ]
 
 -- | Display a list of strings indented and wrapped to fit the given width
 indentedList :: Int -> Int -> [String] -> String
@@ -219,6 +364,45 @@ main = readCliOpts >>= \o ->
   let
     expression = optExpression o
   in do
-    evaluate expression
+    --runTests
+    evaluate expression IO.stdin IO.stdout
     putStrLn ""
+
+runTests :: IO ()
+runTests =
+  do
+    putStrLn "Test results: "
+    test "reverse"                  "123456" "654321"
+    test "take 3"                   "123456" "123"
+    test "+1"                       "ABC"    "BBC"
+    test "-1"                       "234"    "134"
+    test "bytes -> + 1"             "ABC"    "BCD"
+    test "dec"                      "A"      "65"
+    test "undec"                    "65"     "A"
+    test "bytes -> concat 2 -> + 1" "1234"   "2244"
+    test "bytes |2> +1"             "1234"   "2244"
+    test "bytes -> 1/4 filter"      "12345"  "234"
+  where
+    test expr input expected =
+      do result <- B8.unpack `fmap` runExpr expr (B8.pack input)
+         if result == expected
+         then putStrLn $ "pass -- " ++ repr
+         else putStrLn $ "FAIL -- " ++ repr ++ " (got: " ++ result ++ ")"
+      where repr = printf "%s => [ %s ] => %s" input expr expected
+    runExpr expr input = 
+      do (rIn, wIn)   <- Proc.createPipe
+         (rOut, wOut) <- Proc.createPipe
+         IO.hSetBuffering rIn IO.NoBuffering
+         IO.hSetBuffering rOut IO.NoBuffering
+         IO.hSetBuffering wIn IO.NoBuffering
+         IO.hSetBuffering wOut IO.NoBuffering
+         B.hPut wIn input
+         IO.hFlush wIn
+         IO.hClose wIn
+         evaluate expr rIn wOut
+         output <- B.hGetSome rOut 128
+         IO.hClose rIn
+         IO.hClose rOut
+         IO.hClose wOut
+         return output
 

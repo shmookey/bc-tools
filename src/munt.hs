@@ -10,6 +10,7 @@ import qualified Crypto.Cipher.Types as Cipher
 import qualified Crypto.Error as CError
 import qualified Crypto.Cipher.AES as AES
 import qualified Crypto.Cipher.DES as DES
+import qualified Crypto.Cipher.Blowfish as Blowfish
 import qualified Crypto.Cipher.TripleDES as TripleDES
 import qualified Crypto.Cipher.Camellia as Camellia
 import qualified Data.ASN1.Encoding as AsnE
@@ -182,9 +183,11 @@ primitive x args = case x of
 
   -- Stream operations
   "id"        -> CL.map id
-  "insert"    -> CL.concatMap (:args)
+  "after"     -> CL.concatMap (:args)
+  "before"    -> CL.concatMap (\x -> args ++ [x])
   "bytes"     -> CL.concatMap $ map B8.singleton . B8.unpack
   "consume"   -> CL.sequence CL.consume =$= CL.map B8.concat
+  "count"     -> CL.sequence CL.consume =$= CL.map (unroll . length)
   "lines"     -> CL.concatMap B8.lines
   "repeat"    -> eat' 2 $ \[n, x] -> take (fromInteger $ roll n) $ repeat x
   "filter"    -> CL.filter (const False)
@@ -243,6 +246,16 @@ primitive x args = case x of
   "deseee2d"  -> ecbDecrypt (cipher :: Cipher TripleDES.DES_EEE2) 
   "desede2e"  -> ecbEncrypt (cipher :: Cipher TripleDES.DES_EDE2) 
   "desede2d"  -> ecbDecrypt (cipher :: Cipher TripleDES.DES_EDE2) 
+  "bfe"       -> ecbEncrypt (cipher :: Cipher Blowfish.Blowfish) 
+  "bfd"       -> ecbDecrypt (cipher :: Cipher Blowfish.Blowfish) 
+  "bf64e"     -> ecbEncrypt (cipher :: Cipher Blowfish.Blowfish64) 
+  "bf64d"     -> ecbDecrypt (cipher :: Cipher Blowfish.Blowfish64) 
+  "bf128e"    -> ecbEncrypt (cipher :: Cipher Blowfish.Blowfish128) 
+  "bf128d"    -> ecbDecrypt (cipher :: Cipher Blowfish.Blowfish128) 
+  "bf256e"    -> ecbEncrypt (cipher :: Cipher Blowfish.Blowfish256) 
+  "bf256d"    -> ecbDecrypt (cipher :: Cipher Blowfish.Blowfish256) 
+  "bf448e"    -> ecbEncrypt (cipher :: Cipher Blowfish.Blowfish448) 
+  "bf448d"    -> ecbDecrypt (cipher :: Cipher Blowfish.Blowfish448)
 
   -- Hashes
   "blake2s256"  -> hmap H.Blake2s_256
@@ -330,16 +343,19 @@ readCliOpts =
       [ ("Encode", ["b64e", "b64d"])
       , ("Format", ["bin", "dec", "hex", "unbin", "undec", "unhex"])
       , ("Math",   ["+", "-", "*", "/", "%", "^"])
-      , ("Bits",   ["and", "or", "xor", "not", "rsh", "lsh"])
+      , ("Bitwise",["and", "or", "xor", "not", "rsh", "lsh"])
       , ("Util",   ["id", "trace"])
       , ("List",   ["drop", "head", "init", "last", "len", "reverse", "tail",
                     "take"])
-      , ("Stream", ["bytes", "concat", "consume", "filter", "flip", "insert",
-                    "lines", "repeat", "unlines", "unwords", "words"])
+      , ("Stream", ["after", "before", "bytes", "concat", "consume", "count", 
+                    "filter", "flip", "lines", "repeat", "unlines", "unwords",
+                    "words"])
       , ("Cipher", ["aes128d", "aes128e", "aes192d", "aes192e", "aes256d", 
-                    "aes256e", "dese", "desd", "deseee3e", "deseee3d",
-                    "desede3e", "desede3d", "deseee2e", "deseee2d", "desede2e",
-                    "desede2d", "cam128e", "cam128d"])
+                    "aes256e", "bfe", "bfd", "bf64e", "bf64d", "bf128e", 
+                    "bf128d", "bf256e", "bf256d", "bf448e", "bf448d", "dese", 
+                    "desd", "deseee3e", "deseee3d", "desede3e", "desede3d", 
+                    "deseee2e", "deseee2d", "desede2e", "desede2d", "cam128e",
+                    "cam128d"])
       , ("Hash",   ["blake2s256", "blake2s224", "blake2sp256", "blake2sp224",
                     "blake2b512", "blake2bp512", "md2", "md4", "md5", "sha1",
                     "sha224", "sha256", "sha384", "sha512", "sha512t256",

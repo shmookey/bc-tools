@@ -35,26 +35,32 @@ import qualified System.Process as Proc
 import qualified Text.Parsec as P
 import qualified Text.ParserCombinators.Parsec as PC
 
-import Options.Applicative ((<>),(<|>))
-import Data.Conduit (Source, Sink, Conduit, await, yield, ($$), (=$=))
+import Control.Monad (join, replicateM, void)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad (join)
 import Data.Bits (Bits, (.|.), (.&.), shiftL, shiftR, xor)
+import Data.Conduit (Source, Sink, Conduit, await, yield, ($$), (=$=))
 import Data.List (intercalate)
+import Data.Maybe (isJust)
+import Options.Applicative ((<>),(<|>))
 import Text.Printf (printf)
 import Text.Read (readMaybe)
 
 data Options = Options
   { optExpression :: String
+  , optRunTests   :: Bool
   }
 
 type Blob = B8.ByteString
 type Transform = Conduit Blob IO Blob
 type Interval  = ([Int], Int)
-data InputSource = FileSource FilePath | StdIn
+
+type Input       = (InputSource, InputMode)
+data InputSource = FileSource FilePath | StdIn deriving (Show)
+data InputMode   = LineInput | ByteInput | EntireInput deriving (Show)
+
 
 data Pipeline = Pipeline
-  { inputs :: [InputSource]
+  { inputs :: [Input]
   , tasks  :: [(String, [Blob], Interval)]
   }
 
@@ -94,29 +100,43 @@ pipeline = chain
                      fs   <- P.many (arrow >>= next)
                      return $ Pipeline srcs (f1 : concat fs)
 
-    inputs = let inputArrow   = (P.string "=>") >> return ()
-                 inputSources = P.sepBy (spacePadded inputSource) comma
-                 srcSection   = do xs <- spacePadded inputSources
-                                   spacePadded inputArrow
-                                   return xs
-             in P.try srcSection <|> return [StdIn]
+    inputs = let section  = do xs <- spacePadded list
+                               spacePadded arrow
+                               return xs
+                 list     = commaSeparated inputSource
+                 arrow    = void $ P.string "=>"
+                 defaults = return [(StdIn, LineInput)]
+             in P.try section <|> defaults
 
-    inputSource = let filepath = intercalate "/" `fmap` P.sepEndBy filename fslash
-                      filename = rawFile <|> quotedString
-                      rawFile  = do x  <- P.noneOf "-/, ="
-                                    xs <- P.many $ P.noneOf ("/, =")
-                                    return (x:xs)
-                  in (P.string "-" >> return StdIn)
-                 <|> (filepath >>= return . FileSource)
-    
-    stdInterval  = ([1], 1)
-    quotedString = P.between dblQuote dblQuote $ P.many1 nonDblQuote
-    intLiteral   = read `fmap` P.many1 P.digit
-    spacePadded  = P.between P.spaces P.spaces
-    dblQuote     = P.char '"'
-    nonDblQuote  = P.noneOf "\""
-    comma        = P.char ','
-    fslash       = P.char '/'
+    inputSource = let inputSource = sourceFile <|> sourceStdin
+                      inputMode   = modeLine <|> modeByte <|> modeDefault
+
+                      sourceStdin = P.string "-" >> return StdIn
+                      sourceFile  = path >>= return . FileSource
+
+                      modeLine    = const LineInput <$> P.char '^'
+                      modeByte    = const ByteInput <$> P.char '*'
+                      modeDefault = return EntireInput
+
+                  in do mode   <- inputMode
+                        source <- inputSource
+                        return (source, mode)
+   
+    path = let unquotedPath = intercalate "/" <$> P.sepEndBy pathPart fslash
+               pathPart     = do x  <- P.noneOf "-/, ="
+                                 xs <- P.many $ P.noneOf "/, ="
+                                 return (x:xs)
+           in unquotedPath <|> quotedString
+ 
+    commaSeparated p = P.sepBy (spacePadded p) comma
+    stdInterval      = ([1], 1)
+    quotedString     = P.between dblQuote dblQuote $ P.many1 nonDblQuote
+    intLiteral       = read `fmap` P.many1 P.digit
+    spacePadded      = P.between P.spaces P.spaces
+    dblQuote         = P.char '"'
+    nonDblQuote      = P.noneOf "\""
+    comma            = P.char ','
+    fslash           = P.char '/'
 
 -- | Split on a delimeter and trim whitespace on each term
 split :: String -> String -> [String]
@@ -131,10 +151,46 @@ evaluate x hIn hOut = case P.parse pipeline "(command)" x of
         output = CC.sinkHandle  hOut
     in (foldl (=$=) input $ map (\(f,a,i) -> apply f a i) fs) $$ output
 
-createProducer :: IO.Handle -> [InputSource] -> Source IO Blob
+createProducer :: IO.Handle -> [Input] -> Source IO Blob
 createProducer stdin = foldl1 (>>) . map getSource
-  where getSource (FileSource p) = liftIO (B.readFile p) >>= yield
-        getSource StdIn          = liftIO (B.hGetContents stdin) >>= yield
+  where 
+    getSource (FileSource path, inputMode) =
+      let getChunk  = liftIO . nextChunk inputMode
+          getHandle = liftIO $ unbufferedFileHandle path
+          while c t = CC.repeatWhileM t c =$= CL.catMaybes
+      in do handle <- getHandle
+            while isJust $ getChunk handle
+   
+    getSource (StdIn, inputMode) =
+      liftIO (B.hGetContents stdin) >>= yield
+
+    unbufferedFileHandle :: FilePath -> IO IO.Handle
+    unbufferedFileHandle path = 
+      do handle <- IO.openBinaryFile path IO.ReadMode
+         IO.hSetBuffering handle IO.NoBuffering
+         return handle
+  
+    nextChunk :: InputMode -> IO.Handle -> IO (Maybe Blob)
+    nextChunk mode handle = do
+      done <- isFinished handle
+      if done then return Nothing
+      else readChunk mode handle
+       >>= return . Just
+
+    isFinished :: IO.Handle -> IO Bool
+    isFinished handle = do
+      closed <- IO.hIsClosed handle
+      if closed then return True
+      else do
+        eof <- IO.hIsEOF handle
+        if eof then return True
+               else return False
+      
+
+    readChunk :: InputMode -> IO.Handle -> IO Blob
+    readChunk LineInput   = B.hGetLine
+    readChunk ByteInput   = flip B.hGet 1
+    readChunk EntireInput = B.hGetContents 
 
 apply :: String -> [Blob] -> Interval -> Conduit Blob IO Blob
 apply fname args (steps, cycle) =
@@ -334,8 +390,13 @@ readCliOpts =
     cliOpts = Options
       <$> Opts.argument Opts.str
           ( Opts.metavar "[ sources => ] action [ -> action -> ... ]"
+         <> Opts.value   ""
          <> Opts.help    "Function expression to use for transformation."
           )
+     <*> Opts.switch
+         ( Opts.long  "test"
+        <> Opts.short 't'
+        <> Opts.help  "Run tests." )
     ind       = 10
     fnDoc     = printf "Available functions:\n%s" $ intercalate "" sections
     list t xs = printf "  %-7s %s\n" t $ drop ind (indentedList ind 80 xs)
@@ -379,10 +440,15 @@ main :: IO ()
 main = readCliOpts >>= \o ->
   let
     expression = optExpression o
+    testMode   = optRunTests o
   in do
-    --runTests
-    evaluate expression IO.stdin IO.stdout
-    putStrLn ""
+    if testMode
+    then runTests
+    else do
+      IO.hSetBuffering IO.stdin IO.NoBuffering
+      IO.hSetBuffering IO.stdout IO.NoBuffering
+      evaluate expression IO.stdin IO.stdout
+      putStrLn ""
 
 runTests :: IO ()
 runTests =

@@ -65,7 +65,7 @@ data Pipeline = Pipeline
   }
 
 pipeline :: PC.CharParser () Pipeline
-pipeline = chain
+pipeline = pipeline
   where
     fnCall  = let fnName   = operator <|> name
                   name     = P.many1 P.alphaNum
@@ -87,24 +87,29 @@ pipeline = chain
                                  return (steps, cycle)
                in P.option stdInterval stepDef
    
-    chain    = let arrow         = spacePadded basicArrow <|> spacePadded concatArrow
-                   basicArrow    = (P.string "->") >> return Nothing
-                   concatArrow   = do P.char '|'
-                                      n <- (unroll . toInteger) `fmap` intLiteral
-                                      P.char '>'
-                                      return $ Just ("concat", [n], stdInterval)
-                   next (Just a) = fnCall >>= \x -> return [a, x]
-                   next Nothing  = fnCall >>= \x -> return [x]
-               in do srcs <- inputs
-                     f1   <- fnCall
-                     fs   <- P.many (arrow >>= next)
-                     return $ Pipeline srcs (f1 : concat fs)
+    functions = let arrow         = spacePadded basicArrow <|> spacePadded concatArrow
+                    basicArrow    = (P.string "->") >> return Nothing
+                    concatArrow   = do P.char '|'
+                                       n <- (unroll . toInteger) `fmap` intLiteral
+                                       P.char '>'
+                                       return $ Just ("concat", [n], stdInterval)
+                    next (Just a) = fnCall >>= \x -> return [a, x]
+                    next Nothing  = fnCall >>= \x -> return [x]
+                in do f1   <- fnCall
+                      fs   <- P.many (arrow >>= next)
+                      return $ (f1 : concat fs)
 
-    inputs = let section  = do xs <- spacePadded list
-                               spacePadded arrow
-                               return xs
+    pipeline = let justInputs    = flip Pipeline [] <$> inputs
+                   justFunctions = Pipeline [(StdIn, LineInput)] <$> functions
+                   fullPipeline  = do srcs <- inputs
+                                      sourceArrow
+                                      fns <- functions
+                                      return $ Pipeline srcs fns
+                   sourceArrow   = void $ P.string "=>"
+               in P.try fullPipeline <|> P.try justInputs <|> P.try justFunctions
+                   
+    inputs = let section  = spacePadded list
                  list     = commaSeparated inputSource
-                 arrow    = void $ P.string "=>"
                  defaults = return [(StdIn, LineInput)]
              in P.try section <|> defaults
 
@@ -149,10 +154,10 @@ evaluate x hIn hOut = case P.parse pipeline "(command)" x of
   Right (Pipeline sources fs) ->
     let input  = createProducer hIn sources
         output = CC.sinkHandle  hOut
-    in (foldl (=$=) input $ map (\(f,a,i) -> apply f a i) fs) $$ output
+    in liftIO (putStrLn (show sources)) >> liftIO (putStrLn (show fs)) >> (foldl (=$=) input $ map (\(f,a,i) -> apply f a i) fs) $$ output
 
 createProducer :: IO.Handle -> [Input] -> Source IO Blob
-createProducer stdin = foldl1 (>>) . map getSource
+createProducer stdin srcs = C.sequenceSources (map getSource srcs) =$= CL.concat
   where 
     getSource (FileSource path, inputMode) =
       let getChunk  = liftIO . nextChunk inputMode

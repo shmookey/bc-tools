@@ -69,7 +69,7 @@ user@host:~$ echo -n "AB" | munt '+ 1 -> hex'
 
 Generate an ethereum node private/public key pair:
 
-`user@host:~$ openssl ecparam -name secp256k1 -genkey -outform DER | munt 'repeat 2->1/2{drop 7->take 32}->2/2{drop 53->take 65}->hex->unlines'`
+```user@host:~$ openssl ecparam -name secp256k1 -genkey -outform DER | munt 'repeat 2->1/2{drop 7->take 32}->2/2{drop 53->take 65}->hex->unlines'```
 
 ## jrc
 

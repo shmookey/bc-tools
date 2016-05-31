@@ -43,6 +43,7 @@ executable munt
                      , bytestring
                      , conduit
                      , conduit-combinators
+                     , containers
                      , cryptonite
                      , digits
                      , hex

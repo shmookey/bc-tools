@@ -1,7 +1,7 @@
 
 all: .stack-work
 	mkdir -p build
-	stack build --copy-bins --local-bin-path build/
+	stack build --ghc-options=-Wall --copy-bins --local-bin-path build/
 
 .stack-work:
 	stack setup

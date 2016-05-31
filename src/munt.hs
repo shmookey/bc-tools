@@ -9,10 +9,11 @@ import Data.List (intercalate)
 import Options.Applicative ((<>))
 import Text.Printf (printf)
 
+import Munt.Types
 import qualified Munt.App as App
 
 
-readCliOpts :: IO App.Options
+readCliOpts :: IO Options
 readCliOpts =
   Opts.execParser $ Opts.info (Opts.helper <*> cliOpts)
     ( Opts.fullDesc
@@ -20,7 +21,7 @@ readCliOpts =
    <> Opts.progDesc "Transform input with cryptographic functions." 
    <> Opts.footerDoc (OAHC.unChunk (OAHC.stringChunk fnDoc)) )
   where 
-    cliOpts = App.Options
+    cliOpts = Options
       <$> Opts.argument Opts.str
           ( Opts.metavar "[ sources => ] action [ -> action -> ... ]"
          <> Opts.value   ""
@@ -72,8 +73,8 @@ indentedList indentBy width =
 main :: IO ()
 main = readCliOpts >>= \o ->
   let
-    expression = App.optExpression o
-    testMode   = App.optRunTests o
+    expression = optExpression o
+    testMode   = optRunTests o
   in do
     IO.hSetBuffering IO.stdin IO.NoBuffering
     IO.hSetBuffering IO.stdout IO.NoBuffering

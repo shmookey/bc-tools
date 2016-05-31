@@ -7,8 +7,7 @@ import Data.List (intercalate)
 import Options.Applicative ((<|>))
 import Data.Functor.Identity
 
-
-type Parser a = P.ParsecT String () IO a
+import Munt.Types
 
 
 -- Files, paths and directories

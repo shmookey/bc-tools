@@ -255,8 +255,9 @@ primitive x args = case x of
   "bytes"     -> CL.concatMap $ map B8.singleton . B8.unpack
   "consume"   -> CL.sequence CL.consume =$= CL.map B8.concat
   "count"     -> CL.sequence CL.consume =$= CL.map (unroll . length)
+  "dup"       -> CL.concatMap $ replicate 2
   "lines"     -> CL.concatMap B8.lines
-  "repeat"    -> eat' 2 $ \[n, x] -> take (fromInteger $ roll n) $ repeat x
+  "repeat"    -> eat' 2 $ \[n, x] -> replicate (fromInteger $ roll n) x
   "filter"    -> CL.filter (const False)
   "flip"      -> eat' 2 $ \[x, y] -> [y, x]
   "unlines"   -> CL.sequence CL.consume =$= CL.map (B8.init . B8.unlines)

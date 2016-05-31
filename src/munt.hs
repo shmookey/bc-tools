@@ -39,11 +39,11 @@ readCliOpts =
       , ("Math",   ["+", "-", "*", "/", "%", "^"])
       , ("Bitwise",["and", "or", "xor", "not", "rsh", "lsh"])
       , ("Util",   ["id", "trace"])
-      , ("List",   ["drop", "head", "init", "last", "len", "reverse", "tail",
-                    "take"])
+      , ("List",   ["append", "drop", "head", "init", "last", "len", "prepend",
+                    "reverse", "tail", "take"])
       , ("Stream", ["after", "before", "bytes", "concat", "consume", "count", 
-                    "filter", "flip", "lines", "repeat", "unlines", "unwords",
-                    "words"])
+                    "dup", "filter", "flip", "lines", "repeat", "unlines", 
+                    "unwords", "words"])
       , ("Cipher", ["aes128d", "aes128e", "aes192d", "aes192e", "aes256d", 
                     "aes256e", "bfe", "bfd", "bf64e", "bf64d", "bf128e", 
                     "bf128d", "bf256e", "bf256d", "bf448e", "bf448d", "dese", 

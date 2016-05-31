@@ -18,6 +18,27 @@ Stack will download an appropriate Haskell distribution on first build.
 
 ## munt
 
+Munt is a compact language for manipulating streams of binary data, suited to
+use on the command line and in scripts. Munt programs are *pipelines* composed
+by chaining functions together in a similar way to programs piped together by
+the shell's own pipe operator. Munt extends this concept with a more flexible
+piping mechanism and a large library of built-in functions, supporting a range
+of stream processing scenarios including cryptography*, signal processing and
+working with binary protocols.
+
+Compared to other programming languages, munt has no types or data structures,
+no variables or named values, no side-effects, and flow control is "downstream-
+only" - there are no for-loops, no recursion and no "backwards jump". In spite
+of these omissions it's quite powerful, and very easy to pick up because of
+them. It's also fast and memory-efficient. Programs only read as much from the
+stream as they need to generate the next chunk of output, then forget about it.
+Your old laptop from 5 years ago can probably stream gigabits of data through
+a munt program without ever runing out of memory.
+
+\* Cryptography does not mean security! Use munt for experimenting with
+cryptographic primitives and implementing your own. Don't use it to sign tokens
+in your web service. Munt is not security software.
+
 **Usage**
 
 ```
@@ -69,7 +90,9 @@ user@host:~$ echo -n "AB" | munt '+ 1 -> hex'
 
 Generate an ethereum node private/public key pair:
 
-```user@host:~$ openssl ecparam -name secp256k1 -genkey -outform DER | munt 'repeat 2->1/2{drop 7->take 32}->2/2{drop 53->take 65}->hex->unlines'```
+```
+user@host:~$ openssl ecparam -name secp256k1 -genkey -outform DER | munt 'repeat 2->1/2{drop 7->take 32}->2/2{drop 53->take 65}->hex->unlines'
+```
 
 ## jrc
 
